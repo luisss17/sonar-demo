@@ -1,93 +1,87 @@
-import os
-import sys
 import json
-import hashlib
+import logging
+import os
 import sqlite3
+
 from flask import Flask, request
+from werkzeug.security import check_password_hash
 
 app = Flask(__name__)
 
-DB_PASSWORD = "admin123"
-SECRET_KEY = "mi-clave-super-secreta"
-app.config["SECRET_KEY"] = SECRET_KEY
+# Los secretos vienen de variables de entorno, no del codigo
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "")
+DB_PATH = os.environ.get("DB_PATH", "usuarios.db")
+
+logger = logging.getLogger(__name__)
+
+MSG_INVALID_PARAMS = "Parametros invalidos"
 
 
 def get_connection():
-    conn = sqlite3.connect("usuarios.db")
-    return conn
+    return sqlite3.connect(DB_PATH)
 
 
 @app.route("/user")
 def get_user():
-    name = request.args.get("name")
-    conn = get_connection()
-    cursor = conn.cursor()
-    # Vulnerable a inyeccion SQL
-    query = "SELECT * FROM users WHERE name = '" + name + "'"
-    cursor.execute(query)
-    result = cursor.fetchall()
+    name = request.args.get("name", "")
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        # Consulta parametrizada: evita inyeccion SQL
+        cursor.execute("SELECT id, name FROM users WHERE name = ?", (name,))
+        result = cursor.fetchall()
     return json.dumps(result)
 
 
 @app.route("/login", methods=["POST"])
 def login():
-    user = request.form.get("user")
-    password = request.form.get("password")
-    # Hash debil
-    hashed = hashlib.md5(password.encode()).hexdigest()
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE name = '" + user + "' AND password = '" + hashed + "'")
-    if cursor.fetchone():
+    user = request.form.get("user", "")
+    password = request.form.get("password", "")
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT password FROM users WHERE name = ?", (user,))
+        row = cursor.fetchone()
+    # Hash con salt (werkzeug) en lugar de MD5
+    if row and check_password_hash(row[0], password):
         return "Bienvenido"
-    else:
-        return "Credenciales invalidas"
+    return "Credenciales invalidas", 401
 
 
 @app.route("/divide")
 def divide():
-    a = request.args.get("a")
-    b = request.args.get("b")
     try:
-        resultado = int(a) / int(b)
-        return str(resultado)
-    except:
-        return "Error"
+        a = int(request.args.get("a", ""))
+        b = int(request.args.get("b", ""))
+        return str(a / b)
+    except (ValueError, ZeroDivisionError) as exc:
+        logger.warning("Operacion invalida: %s", exc)
+        return MSG_INVALID_PARAMS, 400
+
+
+REPORT_MESSAGES = {
+    ("admin", "alto", "si"): "Admin alto activo",
+    ("admin", "alto", "no"): "Admin alto inactivo",
+    ("admin", "bajo", "si"): "Admin bajo activo",
+    ("admin", "bajo", "no"): "Admin bajo inactivo",
+    ("user", "alto", "si"): "User alto activo",
+    ("user", "alto", "no"): "User alto inactivo",
+    ("user", "bajo", "si"): "User bajo activo",
+    ("user", "bajo", "no"): "User bajo inactivo",
+}
+
+
+def build_report(tipo, nivel, activo):
+    # Tabla de busqueda en vez de if anidados (menor complejidad cognitiva)
+    return REPORT_MESSAGES.get((tipo, nivel, activo), "Tipo desconocido")
 
 
 @app.route("/report")
 def report():
-    tipo = request.args.get("tipo")
-    nivel = request.args.get("nivel")
-    activo = request.args.get("activo")
-    salida = ""
-    if tipo == "admin":
-        if nivel == "alto":
-            if activo == "si":
-                salida = "Admin alto activo"
-            else:
-                salida = "Admin alto inactivo"
-        else:
-            if activo == "si":
-                salida = "Admin bajo activo"
-            else:
-                salida = "Admin bajo inactivo"
-    else:
-        if tipo == "user":
-            if nivel == "alto":
-                if activo == "si":
-                    salida = "User alto activo"
-                else:
-                    salida = "User alto inactivo"
-            else:
-                if activo == "si":
-                    salida = "User bajo activo"
-                else:
-                    salida = "User bajo inactivo"
-        else:
-            salida = "Tipo desconocido"
-    return salida
+    return build_report(
+        request.args.get("tipo"),
+        request.args.get("nivel"),
+        request.args.get("activo"),
+    )
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0")
+    app.run(debug=False, host="127.0.0.1")
